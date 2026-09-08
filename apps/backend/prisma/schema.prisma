@@ -1,0 +1,243 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id          String        @id @default(uuid())
+  phone       String        @unique
+  email       String?       @unique
+  name        String?
+  role        Role          @default(PLAYER)
+  profile     Profile?
+  bookings    Booking[]
+  hostedGames Game[]        @relation("HostedGames")
+  joinedGames GamePlayer[]  @relation("JoinedGames")
+  clanMembers ClanMember[]
+  badges      UserBadge[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+
+enum Role {
+  PLAYER
+  TURF_OWNER
+  ADMIN
+}
+
+model Profile {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id])
+  avatar         String?
+  level          Int      @default(1)
+  xp             Int      @default(0)
+  favoriteSports String[] 
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model Turf {
+  id          String   @id @default(uuid())
+  ownerId     String
+  name        String
+  description String?
+  address     String
+  lat         Float?
+  lng         Float?
+  grounds     Ground[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Ground {
+  id           String     @id @default(uuid())
+  turfId       String
+  turf         Turf       @relation(fields: [turfId], references: [id])
+  name         String
+  sport        String
+  price        Int        // Default price per hour
+  openingTime  String?    // HH:MM in Asia/Kolkata — metadata only, not enforced in Module 2
+  closingTime  String?    // HH:MM in Asia/Kolkata — metadata only, not enforced in Module 2
+  slots        TimeSlot[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+}
+
+model TimeSlot {
+  id        String    @id @default(uuid())
+  groundId  String
+  ground    Ground    @relation(fields: [groundId], references: [id])
+  startTime DateTime
+  endTime   DateTime
+  price     Int       // Owner-published price — server-authoritative, never trusted from client
+  isBlocked Boolean   @default(false)
+  bookings  Booking[]
+  game      Game?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([groundId, startTime, endTime])
+  @@index([groundId, startTime])
+}
+
+model Booking {
+  id          String        @id @default(uuid())
+  userId      String
+  user        User          @relation(fields: [userId], references: [id])
+  slotId      String
+  slot        TimeSlot      @relation(fields: [slotId], references: [id])
+  status      BookingStatus @default(PENDING)
+  totalAmount Int
+  paymentId   String?       // Reference to Razorpay or other payment gateway
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+model Game {
+  id             String         @id @default(uuid())
+  hostId         String
+  host           User           @relation("HostedGames", fields: [hostId], references: [id])
+  sport          String
+  slotId         String         @unique // A game is tied to one specific slot
+  slot           TimeSlot       @relation(fields: [slotId], references: [id])
+  minPlayers     Int
+  maxPlayers     Int
+  pricePerPlayer Int
+  visibility     GameVisibility @default(PUBLIC)
+  guidelines     String?
+  players        GamePlayer[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+}
+
+model GamePlayer {
+  id        String       @id @default(uuid())
+  gameId    String
+  game      Game         @relation(fields: [gameId], references: [id])
+  userId    String
+  user      User         @relation("JoinedGames", fields: [userId], references: [id])
+  status    PlayerStatus @default(JOINED)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@unique([gameId, userId])
+}
+
+enum GameVisibility {
+  PUBLIC
+  TRUSTED
+  FRIENDS
+  CLAN
+  INVITE_ONLY
+}
+
+enum PlayerStatus {
+  JOINED
+  WAITLIST
+  CANCELLED
+}
+
+// --- NEW STAGE 11, 12, 13, 14 SCHEMA ---
+
+model Friendship {
+  id        String       @id @default(uuid())
+  user1Id   String
+  user2Id   String
+  status    FriendStatus @default(PENDING)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  
+  @@unique([user1Id, user2Id])
+}
+
+enum FriendStatus {
+  PENDING
+  ACCEPTED
+  BLOCKED
+}
+
+model Clan {
+  id          String       @id @default(uuid())
+  name        String       @unique
+  description String?
+  level       Int          @default(1)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  members     ClanMember[]
+}
+
+model ClanMember {
+  id        String   @id @default(uuid())
+  clanId    String
+  clan      Clan     @relation(fields: [clanId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  role      ClanRole @default(MEMBER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@unique([clanId, userId])
+}
+
+enum ClanRole {
+  CAPTAIN
+  VICE_CAPTAIN
+  MEMBER
+}
+
+model ChatRoom {
+  id        String        @id @default(uuid())
+  name      String?       // For group chats (clans, games)
+  type      ChatType
+  entityId  String?       // ID of the game or clan this room belongs to
+  messages  ChatMessage[]
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+}
+
+enum ChatType {
+  DIRECT
+  GAME
+  CLAN
+}
+
+model ChatMessage {
+  id        String   @id @default(uuid())
+  roomId    String
+  room      ChatRoom @relation(fields: [roomId], references: [id])
+  senderId  String
+  content   String
+  createdAt DateTime @default(now())
+}
+
+model Badge {
+  id          String      @id @default(uuid())
+  name        String
+  description String
+  icon        String
+  users       UserBadge[]
+}
+
+model UserBadge {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  badgeId   String
+  badge     Badge    @relation(fields: [badgeId], references: [id])
+  createdAt DateTime @default(now())
+  
+  @@unique([userId, badgeId])
+}
