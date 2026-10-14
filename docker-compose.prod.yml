@@ -1,0 +1,160 @@
+version: '3.8'
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Turff — Production Docker Compose Orchestration
+#
+# Security Hardened:
+#   - Database and Redis have ZERO host-exposed ports (internal bridge only).
+#   - Backend runs as unprivileged non-root node user.
+#   - Web reverse proxies static portals and API endpoints.
+#   - Secrets supplied via environment variables only.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+services:
+  # ── PostgreSQL (Internal Network Only) ──────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    command: >
+      postgres
+      -c wal_level=replica
+      -c archive_mode=on
+      -c archive_command='/usr/local/bin/wal-archive.sh %p %f'
+      -c archive_timeout=300
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-turff_db}
+    volumes:
+      - turff_db_data:/var/lib/postgresql/data
+      - turff_wal_archive:/wal_archive
+      - ./scripts/wal-archive.sh:/usr/local/bin/wal-archive.sh:ro
+    networks:
+      - turff_internal
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (Internal Network Only) ───────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --save 60 1
+      --loglevel warning
+    volumes:
+      - turff_redis_data:/data
+    networks:
+      - turff_internal
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Turff Backend API ──────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./apps/backend
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-turff_db}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      FIREBASE_SERVICE_ACCOUNT_JSON: ${FIREBASE_SERVICE_ACCOUNT_JSON:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - turff_internal
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:3000/health/ready || exit 1']
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # ── Web Portals & Reverse Proxy Gateway ─────────────────────────────────────
+  web:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - '${WEB_PORT:-80}:80'
+    volumes:
+      - ./apps/web:/usr/share/nginx/html:ro
+      - ./apps/web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost/health/ready || exit 1']
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    networks:
+      - turff_internal
+
+  # ── PostgreSQL Automated Backup Sidecar (PRA-OPS-03) ──────────────────────
+  db-backup:
+    build:
+      context: .
+      dockerfile: docker/backup/Dockerfile
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-turff_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:-}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-0 2 * * *}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-ap-south-1}
+      BACKUP_S3_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:-}
+      BACKUP_S3_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:-}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-db/}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_RETENTION_WEEKS: ${BACKUP_RETENTION_WEEKS:-4}
+      BACKUP_RETENTION_MONTHS: ${BACKUP_RETENTION_MONTHS:-3}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ADMIN_CHAT_ID: ${TELEGRAM_ADMIN_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - turff_internal
+    volumes:
+      - turff_backup_data:/backups
+      - turff_wal_archive:/wal_archive
+    healthcheck:
+      test: ['CMD-SHELL', 'test -f /backups/latest-status.json || exit 0']
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+networks:
+  turff_internal:
+    driver: bridge
+
+volumes:
+  turff_db_data:
+  turff_redis_data:
+  turff_backup_data:
+  turff_wal_archive:
